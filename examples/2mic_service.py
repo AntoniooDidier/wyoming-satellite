@@ -4,6 +4,9 @@ import argparse
 import asyncio
 import logging
 import time
+import math
+
+from datetime import datetime
 from functools import partial
 from math import ceil
 from typing import Tuple
@@ -20,7 +23,7 @@ from wyoming.satellite import (
     StreamingStopped,
 )
 from wyoming.server import AsyncEventHandler, AsyncServer
-from wyoming.vad import VoiceStarted
+from wyoming.vad import VoiceStarted, VoiceStopped
 from wyoming.wake import Detection
 
 _LOGGER = logging.getLogger()
@@ -76,13 +79,17 @@ async def main() -> None:
 
 # -----------------------------------------------------------------------------
 
-_BLACK = (0, 0, 0)
-_WHITE = (255, 255, 255)
-_RED = (255, 0, 0)
+# Configuração de cores básicas
 _YELLOW = (255, 255, 0)
+_WHITE = (255, 255, 255)
 _BLUE = (0, 0, 255)
 _GREEN = (0, 255, 0)
+_RED = (255, 0, 0)
+_PURPLE = (128, 0, 128)
+_BLACK = (0, 0, 0)
 
+# Número de LEDs no seu setup
+NUM_LEDS = 10
 
 class LEDsEventHandler(AsyncEventHandler):
     """Event handler for clients."""
@@ -100,43 +107,91 @@ class LEDsEventHandler(AsyncEventHandler):
         self.client_id = str(time.monotonic_ns())
         self.leds = leds
 
+        # Controla a execução da transição RGB
+        self.rgb_transition_event = asyncio.Event()
+        self.rgb_transition_event.set()  # Inicia a transição
+
+        # Cria a flag para controlar o estado da transição
+        self.rgb_task = None
+
         _LOGGER.debug("Client connected: %s", self.client_id)
 
     async def handle_event(self, event: Event) -> bool:
         _LOGGER.debug(event)
 
         if StreamingStarted.is_type(event.type):
-            self.color(_YELLOW)
+            if self.rgb_task is None or self.rgb_task.done():
+                self.rgb_transition_event.set()
+                self.rgb_task = asyncio.create_task(self.rgb_transition()) 
+
         elif Detection.is_type(event.type):
-            self.color(_BLUE)
-            await asyncio.sleep(1.0)  # show for 1 sec
+            self.rgb_transition_event.clear()
+            self.color(_PURPLE)
+            await asyncio.sleep(1.0)
         elif VoiceStarted.is_type(event.type):
-            self.color(_YELLOW)
+            self.rgb_transition_event.clear()
+            self.color(_WHITE)
+        elif VoiceStopped.is_type(event.type):
+            if self.rgb_task is None or self.rgb_task.done():
+                self.rgb_transition_event.set()
+                self.rgb_task = asyncio.create_task(self.rgb_transition())
         elif Transcript.is_type(event.type):
+            self.rgb_transition_event.clear()
             self.color(_GREEN)
-            await asyncio.sleep(1.0)  # show for 1 sec
+            await asyncio.sleep(1.0)
         elif StreamingStopped.is_type(event.type):
+            self.rgb_transition_event.clear()
             self.color(_BLACK)
         elif RunSatellite.is_type(event.type):
+            self.rgb_transition_event.clear()
             self.color(_BLACK)
         elif SatelliteConnected.is_type(event.type):
             # Flash
+            self.rgb_transition_event.clear()
             for _ in range(3):
                 self.color(_GREEN)
                 await asyncio.sleep(0.3)
                 self.color(_BLACK)
                 await asyncio.sleep(0.3)
         elif SatelliteDisconnected.is_type(event.type):
+            self.rgb_transition_event.clear()
             self.color(_RED)
 
         return True
 
+    async def rgb_transition(self) -> None:
+        """Cria uma transição suave de cores RGB."""
+
+        steps = 100
+        delay = 0.05
+
+        while self.rgb_transition_event.is_set(): 
+            current_time = datetime.now().time()
+            if datetime.strptime("22:00", "%H:%M").time() <= current_time or current_time <= datetime.strptime("08:00", "%H:%M").time():
+                self.color(_BLACK)
+                await asyncio.sleep(1)  # Aguarda antes de verificar novamente
+            else:
+                step = 0
+                while self.rgb_transition_event.is_set() and not (
+                    datetime.strptime("22:00", "%H:%M").time() <= datetime.now().time() or datetime.now().time() <= datetime.strptime("08:00", "%H:%M").time()
+                ):
+                    red = int((math.sin(step * 2 * math.pi / steps) + 1) * 127.5)
+                    green = int((math.sin(step * 2 * math.pi / steps + 2 * math.pi / 3) + 1) * 127.5)
+                    blue = int((math.sin(step * 2 * math.pi / steps + 4 * math.pi / 3) + 1) * 127.5)
+
+                    self.color((red, green, blue))
+                    await asyncio.sleep(delay)
+
+                    step += 1
+                    if step >= steps:
+                        step = 0
+
     def color(self, rgb: Tuple[int, int, int]) -> None:
+        """Atualiza a cor dos LEDs."""
         for i in range(NUM_LEDS):
             self.leds.set_pixel(i, rgb[0], rgb[1], rgb[2])
 
         self.leds.show()
-
 
 # -----------------------------------------------------------------------------
 
